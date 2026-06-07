@@ -261,7 +261,8 @@ def build_heatmap(prices: pd.DataFrame) -> str:
         annotations=legend_annotations,
     )
 
-    chart_html = fig.to_html(full_html=False, include_plotlyjs="cdn")
+    chart_html = fig.to_html(full_html=False, include_plotlyjs="cdn",
+                             config={"responsive": True})
 
     period_options = "\n      ".join(
         f'<option value="{lbl}">{lbl}</option>' for lbl in all_labels
@@ -280,17 +281,20 @@ def build_heatmap(prices: pd.DataFrame) -> str:
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Portfolio Heatmap</title>
 <style>
 * {{ box-sizing: border-box; }}
-body {{ background: #0d1117; color: #fff; margin: 0;
+html, body {{ height: 100%; }}
+body {{ background: #0d1117; color: #fff; margin: 0; display: flex; flex-direction: column;
        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }}
-h1 {{ text-align: center; font-size: 22px; font-weight: 600; padding: 16px 0 0; }}
+h1 {{ text-align: center; font-size: 20px; font-weight: 600; padding: 12px 0 0; flex-shrink: 0; }}
 .toolbar {{ display: flex; align-items: flex-end; justify-content: center;
-            gap: 14px; padding: 10px 0 4px; }}
+            gap: 14px; padding: 8px 0 4px; flex-shrink: 0; }}
 .toolbar label {{ display: block; font-size: 11px; color: #8b949e; margin-bottom: 4px; }}
 select {{ background: #21262d; color: #fff; border: 1px solid #30363d;
           padding: 6px 14px; font-size: 13px; border-radius: 4px; cursor: pointer; outline: none; }}
+.plotly-graph-div {{ flex: 1 1 auto; min-height: 0; }}
 </style>
 </head>
 <body>

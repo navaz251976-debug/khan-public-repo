@@ -1,0 +1,411 @@
+import json as _json
+from pathlib import Path
+
+import pandas as pd
+import yfinance as yf
+import plotly.graph_objects as go
+
+from tickers import tickers
+
+PERIODS = [1, 7, 15, 30, 60, 90, 180, 270, 365]
+PERIOD_LABELS = ["1D", "7D", "15D", "1M", "2M", "3M", "6M", "9M", "12M"]
+CACHE_PATH = Path("prices_cache.parquet")
+HISTORY_DAYS = 400
+
+
+def _download(symbols: list, **kwargs) -> pd.DataFrame:
+    data = yf.download(symbols, auto_adjust=True, progress=False, **kwargs)
+    prices = data["Close"] if isinstance(data.columns, pd.MultiIndex) else data
+    prices.columns = [str(c) for c in prices.columns]
+    return prices
+
+
+def load_prices(symbols: list) -> pd.DataFrame:
+    cache = pd.read_parquet(CACHE_PATH) if CACHE_PATH.exists() else pd.DataFrame()
+    today = pd.Timestamp.today().normalize()
+
+    # Symbols not yet in cache need a full history pull
+    new_syms = [s for s in symbols if s not in cache.columns]
+    if new_syms:
+        print(f"  New symbols (fetching {HISTORY_DAYS}d): {new_syms}")
+        fresh = _download(new_syms, period=f"{HISTORY_DAYS}d")
+        cache = cache.join(fresh, how="outer") if not cache.empty else fresh
+
+    # Bring existing symbols up to date if cache is stale
+    last_date = cache.index[-1] if not cache.empty else None
+    if last_date is None or last_date.date() < today.date():
+        if last_date is not None:
+            fetch_days = (today - last_date).days + 3
+            print(f"  Cache last updated {last_date.date()} — fetching {fetch_days}d delta ...")
+            delta = _download(symbols, period=f"{fetch_days}d")
+            before = cache[cache.index < delta.index[0]]
+            cache = pd.concat([before, delta])
+            cache = cache[~cache.index.duplicated(keep="last")].sort_index()
+        else:
+            print(f"  No cache — fetching {HISTORY_DAYS}d ...")
+            cache = _download(symbols, period=f"{HISTORY_DAYS}d")
+    else:
+        print(f"  Cache is current ({last_date.date()}) — skipping download.")
+
+    # Trim to keep file lean
+    cache = cache[cache.index >= today - pd.Timedelta(days=HISTORY_DAYS)]
+    cache.to_parquet(CACHE_PATH)
+    print(f"  Cache saved: {len(cache)} rows x {len(cache.columns)} symbols")
+    return cache[[s for s in symbols if s in cache.columns]]
+
+
+def period_stats(prices: pd.DataFrame, calendar_days: int) -> dict:
+    """Returns {sym: (pct, start_price, end_price)} for each symbol."""
+    result = {}
+    for sym in prices.columns:
+        series = prices[sym].dropna()
+        if len(series) < 2:
+            result[sym] = (0.0, 0, 0)
+            continue
+        cutoff = series.index[-1] - pd.Timedelta(days=calendar_days)
+        past = series[series.index <= cutoff]
+        if past.empty:
+            result[sym] = (0.0, 0, 0)
+        else:
+            start = int(round(past.iloc[-1]))
+            end = int(round(series.iloc[-1]))
+            pct = round((end - start) / start * 100, 2)
+            result[sym] = (pct, start, end)
+    return result
+
+
+def afterhours_stats(symbols: list) -> dict:
+    """Returns {sym: (pct, reg_close, ah_price)} — regular close vs latest after-hours price."""
+    try:
+        data = yf.download(symbols, period="1d", interval="1m",
+                           prepost=True, auto_adjust=True, progress=False)
+        prices = data["Close"] if isinstance(data.columns, pd.MultiIndex) else data
+        prices.columns = [str(c) for c in prices.columns]
+    except Exception:
+        return {s: (0.0, 0, 0) for s in symbols}
+
+    result = {}
+    for sym in symbols:
+        if sym not in prices.columns:
+            result[sym] = (0.0, 0, 0)
+            continue
+        series = prices[sym].dropna()
+        if series.empty:
+            result[sym] = (0.0, 0, 0)
+            continue
+
+        idx_et = series.index.tz_convert("America/New_York")
+        # Regular session ends at 16:00 ET
+        reg_mask = (idx_et.hour * 60 + idx_et.minute) <= 16 * 60
+        regular = series[reg_mask]
+
+        if regular.empty:
+            result[sym] = (0.0, 0, 0)
+            continue
+
+        reg_close = regular.iloc[-1]
+        ah_price = series.iloc[-1]
+
+        if reg_close == 0:
+            result[sym] = (0.0, 0, 0)
+            continue
+
+        pct = round((ah_price - reg_close) / reg_close * 100, 2)
+        result[sym] = (pct, int(round(reg_close)), int(round(ah_price)))
+
+    return result
+
+
+# Each list index = 5% bracket: [0-5%), [5-10%), [10-15%), [15-20%), [20%+)
+# Small moves = light, large moves = dark
+_GREEN_STEPS = [
+    "rgb(100,220,100)",
+    "rgb(0,185,65)",
+    "rgb(0,140,45)",
+    "rgb(0,100,30)",
+    "rgb(0,65,18)",
+]
+_RED_STEPS = [
+    "rgb(235,90,90)",
+    "rgb(210,30,30)",
+    "rgb(165,10,10)",
+    "rgb(115,0,0)",
+    "rgb(70,0,0)",
+]
+
+
+def pct_to_color(pct: float) -> str:
+    """Color intensity steps every 5%; up to 5 steps each direction."""
+    if pct == 0:
+        return "rgb(60,60,60)"
+    step = min(int(abs(pct) / 5), len(_GREEN_STEPS) - 1)
+    return _GREEN_STEPS[step] if pct > 0 else _RED_STEPS[step]
+
+
+# Clusters ordered best → worst; each entry: (display name, threshold test, header color)
+CLUSTERS = [
+    ("Strong Gain",  lambda p: p >  5,        "rgb(0,160,60)"),
+    ("Gain",         lambda p: 1 < p <= 5,    "rgb(0,110,45)"),
+    ("Flat",         lambda p: -1 <= p <= 1,  "rgb(55,55,55)"),
+    ("Loss",         lambda p: -5 <= p < -1,  "rgb(160,35,35)"),
+    ("Strong Loss",  lambda p: p < -5,        "rgb(210,20,20)"),
+]
+
+
+def _cluster_name(pct: float) -> str:
+    for name, test, _ in CLUSTERS:
+        if test(pct):
+            return name
+    return "Flat"
+
+
+HEADER_WEIGHT = 0.6  # area reserved for each cluster header bar
+
+
+def build_trace(syms: list, stats: dict, label: str, visible: bool) -> go.Treemap:
+    pcts   = {s: stats.get(s, (0.0, 0, 0))[0] for s in syms}
+    starts = {s: stats.get(s, (0.0, 0, 0))[1] for s in syms}
+    ends   = {s: stats.get(s, (0.0, 0, 0))[2] for s in syms}
+
+    active = [c for c, _, _ in CLUSTERS if any(_cluster_name(pcts[s]) == c for s in syms)]
+    cluster_color_map = {c: col for c, _, col in CLUSTERS}
+    counts = {c: sum(1 for s in syms if _cluster_name(pcts[s]) == c) for c in active}
+
+    # branchvalues="remainder": cluster visible header area = value - sum(children)
+    #   → set cluster value = n_tickers + HEADER_WEIGHT so header gets HEADER_WEIGHT area
+    node_labels  = active + syms
+    node_parents = [""] * len(active) + [_cluster_name(pcts[s]) for s in syms]
+    node_values  = [counts[c] + HEADER_WEIGHT for c in active] + [1] * len(syms)
+    node_colors  = [cluster_color_map[c] for c in active] + \
+                   [pct_to_color(pcts[s]) for s in syms]
+    node_text    = [f"<b>{c}</b>  ({counts[c]})" for c in active] + \
+                   [f"<b>{s}</b><br>{pcts[s]:+.2f}%" for s in syms]
+    node_custom  = [[0, 0, 0]] * len(active) + \
+                   [[pcts[s], starts[s], ends[s]] for s in syms]
+
+    return go.Treemap(
+        labels=node_labels,
+        parents=node_parents,
+        values=node_values,
+        branchvalues="remainder",
+        text=node_text,
+        texttemplate="%{text}",
+        textfont=dict(color="white", size=12),
+        customdata=node_custom,
+        marker=dict(
+            colors=node_colors,
+            line=dict(width=2, color="#0d1117"),
+            pad=dict(t=18, l=2, r=2, b=2),
+        ),
+        hovertemplate=(
+            "<b>%{label}</b><br>"
+            f"Period: {label}<br>"
+            "Start: $%{customdata[1]}<br>"
+            "End:   $%{customdata[2]}<br>"
+            "Return: %{customdata[0]:+.2f}%"
+            "<extra></extra>"
+        ),
+        visible=visible,
+        name=label,
+    )
+
+
+def build_heatmap(prices: pd.DataFrame) -> str:
+    syms = [s for s in tickers if s in prices.columns]
+    all_stats = {days: period_stats(prices, days) for days in PERIODS}
+
+    print("Fetching after-hours data ...")
+    ah_stats = afterhours_stats(syms)
+
+    all_labels = ["After Hours"] + PERIOD_LABELS
+    all_stat_list = [ah_stats] + [all_stats[d] for d in PERIODS]
+
+    # Serialize all stats for JS: {period: {sym: [pct, start, end]}}
+    data_js = {
+        lbl: {s: list(stat.get(s, (0.0, 0, 0))) for s in syms}
+        for lbl, stat in zip(all_labels, all_stat_list)
+    }
+
+    # Initial Plotly figure (After Hours — first in dropdown)
+    initial_trace = build_trace(syms, ah_stats, "After Hours", True)
+
+    legend_shapes, legend_annotations = [], []
+    stops = [-20, -15, -10, -5, 0, 5, 10, 15, 20]
+    bar_x, bar_w, bar_y, bar_h = 0.35, 0.035, -0.04, 0.018
+    for k, v in enumerate(stops):
+        c = pct_to_color(v)
+        legend_shapes.append(dict(
+            type="rect", xref="paper", yref="paper",
+            x0=bar_x + k * bar_w, x1=bar_x + (k + 1) * bar_w,
+            y0=bar_y, y1=bar_y + bar_h,
+            fillcolor=c, line_width=0,
+        ))
+        legend_annotations.append(dict(
+            xref="paper", yref="paper",
+            x=bar_x + k * bar_w + bar_w / 2, y=bar_y - 0.025,
+            text=f"{v:+d}%", showarrow=False,
+            font=dict(color="white", size=10),
+        ))
+
+    fig = go.Figure(data=[initial_trace])
+    fig.update_layout(
+        paper_bgcolor="#0d1117",
+        plot_bgcolor="#0d1117",
+        font=dict(color="white"),
+        margin=dict(t=20, l=5, r=5, b=60),
+        shapes=legend_shapes,
+        annotations=legend_annotations,
+    )
+
+    chart_html = fig.to_html(full_html=False, include_plotlyjs="cdn")
+
+    period_options = "\n      ".join(
+        f'<option value="{lbl}">{lbl}</option>' for lbl in all_labels
+    )
+    ticker_options = (
+        '<option value="__ALL__">All Tickers</option>\n      '
+        + "\n      ".join(f'<option value="{s}">{s}</option>' for s in sorted(syms))
+    )
+
+    data_json  = _json.dumps(data_js)
+    syms_json  = _json.dumps(syms)
+    green_json = _json.dumps(_GREEN_STEPS)
+    red_json   = _json.dumps(_RED_STEPS)
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Portfolio Heatmap</title>
+<style>
+* {{ box-sizing: border-box; }}
+body {{ background: #0d1117; color: #fff; margin: 0;
+       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }}
+h1 {{ text-align: center; font-size: 22px; font-weight: 600; padding: 16px 0 0; }}
+.toolbar {{ display: flex; align-items: flex-end; justify-content: center;
+            gap: 14px; padding: 10px 0 4px; }}
+.toolbar label {{ display: block; font-size: 11px; color: #8b949e; margin-bottom: 4px; }}
+select {{ background: #21262d; color: #fff; border: 1px solid #30363d;
+          padding: 6px 14px; font-size: 13px; border-radius: 4px; cursor: pointer; outline: none; }}
+</style>
+</head>
+<body>
+<h1>Portfolio Heatmap</h1>
+<div class="toolbar">
+  <div>
+    <label for="period-select">Duration</label>
+    <select id="period-select" onchange="updateChart(this)">
+      {period_options}
+    </select>
+  </div>
+  <div>
+    <label for="ticker-select">Ticker</label>
+    <select id="ticker-select" onchange="updateChart(this)">
+      {ticker_options}
+    </select>
+  </div>
+</div>
+{chart_html}
+<script>
+const HEATMAP_DATA = {data_json};
+const ALL_SYMS     = {syms_json};
+const GREEN_STEPS  = {green_json};
+const RED_STEPS    = {red_json};
+
+function pctToColor(pct) {{
+  if (pct === 0) return 'rgb(60,60,60)';
+  const step = Math.min(Math.floor(Math.abs(pct) / 5), GREEN_STEPS.length - 1);
+  return pct > 0 ? GREEN_STEPS[step] : RED_STEPS[step];
+}}
+
+const CLUSTERS = [
+  {{name:'Strong Gain', test: p => p > 5,             color:'rgb(0,160,60)'}},
+  {{name:'Gain',        test: p => p > 1 && p <= 5,   color:'rgb(0,110,45)'}},
+  {{name:'Flat',        test: p => p >= -1 && p <= 1, color:'rgb(55,55,55)'}},
+  {{name:'Loss',        test: p => p >= -5 && p < -1, color:'rgb(160,35,35)'}},
+  {{name:'Strong Loss', test: p => p < -5,            color:'rgb(210,20,20)'}},
+];
+const HEADER_WEIGHT = 0.6;
+
+function clusterName(pct) {{
+  for (const c of CLUSTERS) if (c.test(pct)) return c.name;
+  return 'Flat';
+}}
+
+function buildTraceData(syms, periodData) {{
+  const pcts = {{}}, starts = {{}}, ends = {{}};
+  for (const s of syms) {{
+    const d = periodData[s] || [0, 0, 0];
+    pcts[s] = d[0]; starts[s] = d[1]; ends[s] = d[2];
+  }}
+  const active = CLUSTERS.filter(c => syms.some(s => clusterName(pcts[s]) === c.name));
+  const counts = Object.fromEntries(
+    active.map(c => [c.name, syms.filter(s => clusterName(pcts[s]) === c.name).length])
+  );
+  return {{
+    labels:     [...active.map(c => c.name), ...syms],
+    parents:    [...active.map(() => ''),    ...syms.map(s => clusterName(pcts[s]))],
+    values:     [...active.map(c => counts[c.name] + HEADER_WEIGHT), ...syms.map(() => 1)],
+    colors:     [...active.map(c => c.color), ...syms.map(s => pctToColor(pcts[s]))],
+    text: [
+      ...active.map(c => '<b>' + c.name + '</b>  (' + counts[c.name] + ')'),
+      ...syms.map(s => '<b>' + s + '</b><br>' + (pcts[s] >= 0 ? '+' : '') + pcts[s].toFixed(2) + '%'),
+    ],
+    customdata: [
+      ...active.map(() => [0, 0, 0]),
+      ...syms.map(s => [pcts[s], starts[s], ends[s]]),
+    ],
+  }};
+}}
+
+function updateChart(trigger) {{
+  const period = document.getElementById('period-select').value;
+  const ticker = document.getElementById('ticker-select').value;
+  const symsToShow = ticker === '__ALL__' ? ALL_SYMS : [ticker];
+  const td = buildTraceData(symsToShow, HEATMAP_DATA[period]);
+  const div = document.querySelector('.plotly-graph-div');
+  Plotly.react(div, [{{
+    type: 'treemap',
+    labels: td.labels,
+    parents: td.parents,
+    values: td.values,
+    branchvalues: 'remainder',
+    text: td.text,
+    texttemplate: '%{{text}}',
+    textfont: {{color: 'white', size: 12}},
+    customdata: td.customdata,
+    marker: {{
+      colors: td.colors,
+      line: {{width: 2, color: '#0d1117'}},
+      pad: {{t: 18, l: 2, r: 2, b: 2}},
+    }},
+    hovertemplate: '<b>%{{label}}</b><br>Period: ' + period +
+      '<br>Start: $%{{customdata[1]}}<br>End: $%{{customdata[2]}}<br>' +
+      'Return: %{{customdata[0]:+.2f}}%<extra></extra>',
+  }}], div.layout);
+  if (trigger) trigger.focus();
+}}
+
+setTimeout(function() {{
+  document.querySelector('.plotly-graph-div').on('plotly_click', function(data) {{
+    if (!data.points.length) return;
+    const label = data.points[0].label;
+    if (!ALL_SYMS.includes(label)) return;
+    const tickerSelect = document.getElementById('ticker-select');
+    tickerSelect.value = label;
+    updateChart(tickerSelect);
+  }});
+}}, 0);
+</script>
+</body>
+</html>"""
+
+
+if __name__ == "__main__":
+    print(f"Loading prices for {len(tickers)} tickers ...")
+    prices = load_prices(tickers)
+
+    print("Building figure ...")
+    html = build_heatmap(prices)
+    Path("heatmap.html").write_text(html, encoding="utf-8")
+    print("Saved -> heatmap.html")

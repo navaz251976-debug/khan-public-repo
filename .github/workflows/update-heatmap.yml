@@ -1,0 +1,72 @@
+name: Update Heatmap
+
+on:
+  schedule:
+    - cron: '30 21 * * 1-5'   # 4:30 PM ET (21:30 UTC) Mon–Fri
+  workflow_dispatch:            # manual trigger button in GitHub UI
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Restore prices cache
+        uses: actions/cache@v4
+        with:
+          path: prices_cache.parquet
+          key: prices-${{ github.run_id }}
+          restore-keys: prices-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate heatmap
+        run: python heatmap.py
+
+      - name: Publish to docs/
+        run: |
+          mkdir -p docs
+          cp heatmap.html docs/index.html
+
+      - name: Commit and push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/index.html
+          git diff --staged --quiet || git commit -m "chore: update heatmap $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: 'docs'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

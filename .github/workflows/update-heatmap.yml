@@ -29,10 +29,12 @@ jobs:
           restore-keys: prices-
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt tzdata
 
       - name: Generate heatmap
         run: python heatmap.py
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
       - name: Publish to docs/
         run: |

@@ -94,9 +94,13 @@ def afterhours_stats(symbols: list) -> dict:
             result[sym] = (0.0, 0, 0)
             continue
 
-        idx_et = series.index.tz_convert("America/New_York")
-        # Regular session ends at 16:00 ET
-        reg_mask = (idx_et.hour * 60 + idx_et.minute) <= 16 * 60
+        try:
+            idx_et = series.index.tz_convert("America/New_York")
+            cutoff = 16 * 60
+        except Exception:
+            idx_et = series.index.tz_convert("UTC")
+            cutoff = 21 * 60  # 16:00 ET = 21:00 UTC
+        reg_mask = (idx_et.hour * 60 + idx_et.minute) <= cutoff
         regular = series[reg_mask]
 
         if regular.empty:

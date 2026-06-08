@@ -2,7 +2,7 @@ name: Update Heatmap
 
 on:
   schedule:
-    - cron: '30 21 * * 1-5'   # 4:30 PM ET (21:30 UTC) Mon–Fri
+    - cron: '*/15 11-23 * * 1-5'   # every 15 mins, 6AM–6PM ET (11:00–23:00 UTC) Mon–Fri
   workflow_dispatch:            # manual trigger button in GitHub UI
 
 permissions:

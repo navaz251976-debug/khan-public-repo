@@ -1,7 +1,8 @@
+from pathlib import Path
+import csv
+
 tickers = [
-    'AAPL', 'ADBE', 'AKAM', 'AMD',  'ASAN', 'ASML', 'AUR',  'AVGO', 'AZO',
-    'BABA', 'BITO', 'BMNR', 'CRWD', 'CVX',  'FSLR', 'GLD',  'GOOG', 'INTC',
-    'IONQ', 'LASE', 'LLY',  'LULU', 'MDB',  'MRK',  'MRVL', 'MU',   'NKE',
-    'NVDA', 'NVO',  'OKTA', 'ORCL', 'PANW', 'PFE',  'PLTR', 'SERV', 'SHOP',
-    'SMCI', 'SNDK', 'SNOW', 'TSLA', 'TSM',
+    row["ticker"].strip().upper()
+    for row in csv.DictReader(Path(__file__).with_name("tickers.csv").open())
+    if row["ticker"].strip()
 ]

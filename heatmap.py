@@ -265,7 +265,13 @@ def build_heatmap(prices: pd.DataFrame) -> str:
     chart_html = fig.to_html(full_html=False, include_plotlyjs="cdn",
                              config={"responsive": True})
 
-    now_et_str = datetime.now(timezone.utc).strftime("%m-%d-%y:%H-%M")
+    try:
+        import zoneinfo
+        et = zoneinfo.ZoneInfo("America/New_York")
+        now_et_str = datetime.now(et).strftime("%m-%d-%y:%H-%M")
+    except Exception:
+        from datetime import timedelta
+        now_et_str = (datetime.now(timezone.utc) - timedelta(hours=5)).strftime("%m-%d-%y:%H-%M")
 
     period_options = "\n      ".join(
         f'<option value="{lbl}">{lbl}</option>' for lbl in all_labels
@@ -316,7 +322,7 @@ select {{ background: #21262d; color: #fff; border: 1px solid #30363d;
     </select>
   </div>
   <div style="font-size:11px; color:#8b949e; padding-bottom:6px;">
-    Updated<br>{now_et_str} UTC
+    Updated<br>{now_et_str} EST
   </div>
 </div>
 {chart_html}

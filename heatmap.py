@@ -262,7 +262,7 @@ def build_heatmap(prices: pd.DataFrame) -> str:
     news_data = fetch_news(syms)
 
     print("Building annotated charts ...")
-    sentiments = build_charts(prices, syms)
+    sentiments = build_charts(syms, ah_stats)
 
     all_labels = ["Pre/Post Market"] + PERIOD_LABELS
     all_stat_list = [ah_stats] + [all_stats[d] for d in PERIODS]

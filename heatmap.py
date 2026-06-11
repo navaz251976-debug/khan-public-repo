@@ -343,8 +343,12 @@ h1 {{ text-align: center; font-size: 20px; font-weight: 600; padding: 12px 0 0; 
 select {{ background: #21262d; color: #fff; border: 1px solid #30363d;
           padding: 6px 14px; font-size: 13px; border-radius: 4px; cursor: pointer; outline: none; }}
 .plotly-graph-div {{ flex: 1 1 auto; min-height: 0; }}
-#news-panel {{ display: none; flex-shrink: 0; padding: 8px 16px 14px; max-width: 900px;
-               margin: 0 auto; width: 100%; }}
+#news-panel {{ display: none; position: fixed; bottom: 14px; left: 50%;
+               transform: translateX(-50%); z-index: 10;
+               width: calc(100% - 32px); max-width: 720px;
+               background: rgba(22, 27, 34, 0.97); border: 1px solid #30363d;
+               border-radius: 8px; padding: 10px 16px 12px;
+               box-shadow: 0 4px 16px rgba(0,0,0,0.5); }}
 #news-panel b {{ display: block; font-size: 13px; margin-bottom: 6px; color: #8b949e; }}
 #news-panel a {{ display: block; color: #58a6ff; font-size: 13px; text-decoration: none;
                  padding: 3px 0; }}

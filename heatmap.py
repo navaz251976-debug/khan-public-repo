@@ -76,9 +76,13 @@ def period_stats(prices: pd.DataFrame, calendar_days: int) -> dict:
 
 
 def afterhours_stats(symbols: list) -> dict:
-    """Returns {sym: (pct, reg_close, ah_price)} — regular close vs latest after-hours price."""
+    """Returns {sym: (pct, reg_close, latest_price)} — last regular-session price
+    vs the latest extended-hours (pre-market or after-hours) price.
+
+    Fetches 2 days so that during pre-market (e.g. 6AM PT) the baseline is the
+    previous session's close rather than today's still-empty regular session."""
     try:
-        data = yf.download(symbols, period="1d", interval="1m",
+        data = yf.download(symbols, period="2d", interval="1m",
                            prepost=True, auto_adjust=True, progress=False)
         prices = data["Close"] if isinstance(data.columns, pd.MultiIndex) else data
         prices.columns = [str(c) for c in prices.columns]
@@ -97,12 +101,12 @@ def afterhours_stats(symbols: list) -> dict:
 
         try:
             idx_et = series.index.tz_convert("America/New_York")
-            cutoff = 16 * 60
+            open_min, close_min = 9 * 60 + 30, 16 * 60
         except Exception:
             idx_et = series.index.tz_convert("UTC")
-            cutoff = 21 * 60  # 16:00 ET = 21:00 UTC
-        reg_mask = (idx_et.hour * 60 + idx_et.minute) <= cutoff
-        regular = series[reg_mask]
+            open_min, close_min = 14 * 60 + 30, 21 * 60  # 9:30/16:00 ET in UTC (EDT)
+        minutes = idx_et.hour * 60 + idx_et.minute
+        regular = series[(minutes >= open_min) & (minutes <= close_min)]
 
         if regular.empty:
             result[sym] = (0.0, 0, 0)
@@ -119,6 +123,37 @@ def afterhours_stats(symbols: list) -> dict:
         result[sym] = (pct, int(round(reg_close)), int(round(ah_price)))
 
     return result
+
+
+def fetch_news(symbols: list, max_articles: int = 3) -> dict:
+    """Returns {sym: [{"title", "url", "publisher"}, ...]} — top news per ticker."""
+    news = {}
+    for sym in symbols:
+        articles = []
+        try:
+            items = yf.Ticker(sym).news or []
+        except Exception:
+            items = []
+        for item in items:
+            # yfinance >= 0.2.50 nests fields under "content"; older versions are flat
+            content = item.get("content", item)
+            title = content.get("title")
+            url = (
+                (content.get("canonicalUrl") or {}).get("url")
+                or (content.get("clickThroughUrl") or {}).get("url")
+                or item.get("link")
+            )
+            publisher = (
+                (content.get("provider") or {}).get("displayName")
+                or item.get("publisher")
+                or ""
+            )
+            if title and url:
+                articles.append({"title": title, "url": url, "publisher": publisher})
+            if len(articles) >= max_articles:
+                break
+        news[sym] = articles
+    return news
 
 
 # Each list index = 5% bracket: [0-5%), [5-10%), [10-15%), [15-20%), [20%+)
@@ -219,10 +254,13 @@ def build_heatmap(prices: pd.DataFrame) -> str:
     syms = [s for s in tickers if s in prices.columns]
     all_stats = {days: period_stats(prices, days) for days in PERIODS}
 
-    print("Fetching after-hours data ...")
+    print("Fetching pre/post-market data ...")
     ah_stats = afterhours_stats(syms)
 
-    all_labels = ["After Hours"] + PERIOD_LABELS
+    print("Fetching news ...")
+    news_data = fetch_news(syms)
+
+    all_labels = ["Pre/Post Market"] + PERIOD_LABELS
     all_stat_list = [ah_stats] + [all_stats[d] for d in PERIODS]
 
     # Serialize all stats for JS: {period: {sym: [pct, start, end]}}
@@ -231,8 +269,8 @@ def build_heatmap(prices: pd.DataFrame) -> str:
         for lbl, stat in zip(all_labels, all_stat_list)
     }
 
-    # Initial Plotly figure (After Hours — first in dropdown)
-    initial_trace = build_trace(syms, ah_stats, "After Hours", True)
+    # Initial Plotly figure (Pre/Post Market — first in dropdown)
+    initial_trace = build_trace(syms, ah_stats, "Pre/Post Market", True)
 
     legend_shapes, legend_annotations = [], []
     stops = [-20, -15, -10, -5, 0, 5, 10, 15, 20]
@@ -282,6 +320,7 @@ def build_heatmap(prices: pd.DataFrame) -> str:
     )
 
     data_json  = _json.dumps(data_js)
+    news_json  = _json.dumps(news_data)
     syms_json  = _json.dumps(syms)
     green_json = _json.dumps(_GREEN_STEPS)
     red_json   = _json.dumps(_RED_STEPS)
@@ -304,6 +343,13 @@ h1 {{ text-align: center; font-size: 20px; font-weight: 600; padding: 12px 0 0; 
 select {{ background: #21262d; color: #fff; border: 1px solid #30363d;
           padding: 6px 14px; font-size: 13px; border-radius: 4px; cursor: pointer; outline: none; }}
 .plotly-graph-div {{ flex: 1 1 auto; min-height: 0; }}
+#news-panel {{ display: none; flex-shrink: 0; padding: 8px 16px 14px; max-width: 900px;
+               margin: 0 auto; width: 100%; }}
+#news-panel b {{ display: block; font-size: 13px; margin-bottom: 6px; color: #8b949e; }}
+#news-panel a {{ display: block; color: #58a6ff; font-size: 13px; text-decoration: none;
+                 padding: 3px 0; }}
+#news-panel a:hover {{ text-decoration: underline; }}
+#news-panel .pub {{ color: #8b949e; font-size: 11px; }}
 </style>
 </head>
 <body>
@@ -326,8 +372,10 @@ select {{ background: #21262d; color: #fff; border: 1px solid #30363d;
   </div>
 </div>
 {chart_html}
+<div id="news-panel"></div>
 <script>
 const HEATMAP_DATA = {data_json};
+const NEWS_DATA    = {news_json};
 const ALL_SYMS     = {syms_json};
 const GREEN_STEPS  = {green_json};
 const RED_STEPS    = {red_json};
@@ -352,7 +400,7 @@ function clusterName(pct) {{
   return 'Flat';
 }}
 
-function buildTraceData(syms, periodData) {{
+function buildTraceData(syms, periodData, period) {{
   const pcts = {{}}, starts = {{}}, ends = {{}};
   for (const s of syms) {{
     const d = periodData[s] || [0, 0, 0];
@@ -362,6 +410,16 @@ function buildTraceData(syms, periodData) {{
   const counts = Object.fromEntries(
     active.map(c => [c.name, syms.filter(s => clusterName(pcts[s]) === c.name).length])
   );
+  const single = syms.length === 1;
+  const symText = s => {{
+    const ret = (pcts[s] >= 0 ? '+' : '') + pcts[s].toFixed(2) + '%';
+    if (!single) return '<b>' + s + '</b><br>' + ret;
+    return '<b>' + s + '</b><br><br>' +
+      'Period: ' + period + '<br>' +
+      'Start: $' + starts[s] + '<br>' +
+      'End: $' + ends[s] + '<br>' +
+      'Return: ' + ret;
+  }};
   return {{
     labels:     [...active.map(c => c.name), ...syms],
     parents:    [...active.map(() => ''),    ...syms.map(s => clusterName(pcts[s]))],
@@ -369,7 +427,7 @@ function buildTraceData(syms, periodData) {{
     colors:     [...active.map(c => c.color), ...syms.map(s => pctToColor(pcts[s]))],
     text: [
       ...active.map(c => '<b>' + c.name + '</b>  (' + counts[c.name] + ')'),
-      ...syms.map(s => '<b>' + s + '</b><br>' + (pcts[s] >= 0 ? '+' : '') + pcts[s].toFixed(2) + '%'),
+      ...syms.map(symText),
     ],
     customdata: [
       ...active.map(() => [0, 0, 0]),
@@ -378,11 +436,32 @@ function buildTraceData(syms, periodData) {{
   }};
 }}
 
+function updateNews(ticker) {{
+  const panel = document.getElementById('news-panel');
+  if (ticker === '__ALL__') {{
+    panel.style.display = 'none';
+    return;
+  }}
+  const articles = NEWS_DATA[ticker] || [];
+  let html = '<b>Latest News — ' + ticker + '</b>';
+  if (articles.length === 0) {{
+    html += '<span class="pub">No recent articles found.</span>';
+  }} else {{
+    for (const a of articles.slice(0, 3)) {{
+      html += '<a href="' + a.url + '" target="_blank" rel="noopener">' + a.title +
+              (a.publisher ? ' <span class="pub">— ' + a.publisher + '</span>' : '') + '</a>';
+    }}
+  }}
+  panel.innerHTML = html;
+  panel.style.display = 'block';
+}}
+
 function updateChart(trigger) {{
   const period = document.getElementById('period-select').value;
   const ticker = document.getElementById('ticker-select').value;
   const symsToShow = ticker === '__ALL__' ? ALL_SYMS : [ticker];
-  const td = buildTraceData(symsToShow, HEATMAP_DATA[period]);
+  updateNews(ticker);
+  const td = buildTraceData(symsToShow, HEATMAP_DATA[period], period);
   const div = document.querySelector('.plotly-graph-div');
   Plotly.react(div, [{{
     type: 'treemap',

@@ -6,6 +6,7 @@ import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
 
+from charts import build_charts
 from tickers import tickers
 
 PERIODS = [1, 7, 15, 30, 60, 90, 180, 270, 365]
@@ -260,6 +261,9 @@ def build_heatmap(prices: pd.DataFrame) -> str:
     print("Fetching news ...")
     news_data = fetch_news(syms)
 
+    print("Building annotated charts ...")
+    sentiments = build_charts(prices, syms)
+
     all_labels = ["Pre/Post Market"] + PERIOD_LABELS
     all_stat_list = [ah_stats] + [all_stats[d] for d in PERIODS]
 
@@ -321,6 +325,7 @@ def build_heatmap(prices: pd.DataFrame) -> str:
 
     data_json  = _json.dumps(data_js)
     news_json  = _json.dumps(news_data)
+    sent_json  = _json.dumps(sentiments)
     syms_json  = _json.dumps(syms)
     green_json = _json.dumps(_GREEN_STEPS)
     red_json   = _json.dumps(_RED_STEPS)
@@ -354,6 +359,11 @@ select {{ background: #21262d; color: #fff; border: 1px solid #30363d;
                  padding: 3px 0; }}
 #news-panel a:hover {{ text-decoration: underline; }}
 #news-panel .pub {{ color: #8b949e; font-size: 11px; }}
+#news-panel {{ max-height: 85vh; overflow-y: auto; }}
+#chart-section {{ margin-top: 10px; border-top: 1px solid #30363d; padding-top: 8px; }}
+#chart-section .badge {{ float: right; color: #fff; padding: 1px 10px;
+                         border-radius: 10px; font-size: 11px; }}
+#chart-section img {{ width: 100%; border-radius: 6px; display: block; }}
 </style>
 </head>
 <body>
@@ -380,7 +390,14 @@ select {{ background: #21262d; color: #fff; border: 1px solid #30363d;
 <script>
 const HEATMAP_DATA = {data_json};
 const NEWS_DATA    = {news_json};
+const SENTIMENTS   = {sent_json};
+const CHART_VER    = "{now_et_str}";
 const ALL_SYMS     = {syms_json};
+const SENT_COLORS  = {{
+  'BULLISH': 'rgb(0,160,60)', 'LEANS BULLISH': 'rgb(0,110,45)',
+  'NEUTRAL': 'rgb(90,90,90)',
+  'LEANS BEARISH': 'rgb(160,35,35)', 'BEARISH': 'rgb(210,20,20)',
+}};
 const GREEN_STEPS  = {green_json};
 const RED_STEPS    = {red_json};
 
@@ -456,6 +473,15 @@ function updateNews(ticker) {{
               (a.publisher ? ' <span class="pub">— ' + a.publisher + '</span>' : '') + '</a>';
     }}
   }}
+  const sent = SENTIMENTS[ticker];
+  if (sent) {{
+    html += '<div id="chart-section">' +
+      '<b>Chart Analysis — ' + ticker +
+      '<span class="badge" style="background:' + SENT_COLORS[sent] + '">' + sent + '</span></b>' +
+      '<img src="charts/' + ticker + '.png?v=' + encodeURIComponent(CHART_VER) + '"' +
+      ' alt="' + ticker + ' chart" onerror="this.parentElement.style.display=\\'none\\'">' +
+      '</div>';
+  }}
   panel.innerHTML = html;
   panel.style.display = 'block';
 }}
@@ -511,4 +537,7 @@ if __name__ == "__main__":
     print("Building figure ...")
     html = build_heatmap(prices)
     Path("heatmap.html").write_text(html, encoding="utf-8")
-    print("Saved -> heatmap.html")
+    docs_index = Path("docs") / "index.html"
+    docs_index.parent.mkdir(exist_ok=True)
+    docs_index.write_text(html, encoding="utf-8")
+    print("Saved -> heatmap.html and docs/index.html")

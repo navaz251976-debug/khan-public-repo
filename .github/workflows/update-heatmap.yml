@@ -31,15 +31,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt tzdata
 
-      - name: Generate heatmap
+      - name: Generate heatmap and charts
         run: python heatmap.py
         env:
           FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
-      - name: Publish to docs/
-        run: |
-          mkdir -p docs
-          cp heatmap.html docs/index.html
 
       - name: Commit and push
         run: |
@@ -47,7 +42,18 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add docs/index.html
           git diff --staged --quiet || git commit -m "chore: update heatmap $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git pull --rebase origin main
           git push
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      # Charts in docs/charts/ are generated fresh each run and gitignored —
+      # they reach the site only through this artifact, so the repo never grows.
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: 'docs'
 
   deploy:
     needs: build
@@ -57,18 +63,6 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: 'docs'
-
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5

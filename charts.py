@@ -13,9 +13,13 @@ from pathlib import Path
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 
+SMA50_HEX, SMA200_HEX = "2962FF", "FF9800"          # blue / orange
+SMA50_RGB, SMA200_RGB = (80, 130, 255), (255, 152, 0)
+
 CHART_URL = ("https://charts-node.finviz.com/chart.ashx?cs=l&t={ticker}&tf=d"
              "&s=linear&ct=candle_stick&tm=d"
-             "&o[0][ot]=sma&o[0][op]=50&o[1][ot]=sma&o[1][op]=200")
+             f"&o[0][ot]=sma&o[0][op]=50&o[0][oc]={SMA50_HEX}"
+             f"&o[1][ot]=sma&o[1][op]=200&o[1][oc]={SMA200_HEX}")
 
 HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -79,13 +83,11 @@ def analyze(series: pd.Series) -> dict:
     else:
         label = "NEUTRAL"
 
-    trend = (f"{'above' if close > sma50 else 'below'} SMA50 "
-             f"{sma50:,.0f} / {'above' if close > sma200 else 'below'} "
-             f"SMA200 {sma200:,.0f}")
     return {
         "label": label,
         "close": close,
-        "trend": trend,
+        "sma50": sma50,
+        "sma200": sma200,
         "r21": r21,
         "r63": r63,
         "support": support,
@@ -128,10 +130,21 @@ def annotate(chart: Image.Image, ticker: str, info: dict, stamp: str) -> Image.I
     d.text((chart.width - 12 - d.textlength(stamp_text, font=f_small), 11),
            stamp_text, font=f_small, fill=(139, 148, 158))
 
-    detail = (f"Close {info['close']:,.0f}   {info['trend']}   "
-              f"1M {info['r21']:+.1%}  3M {info['r63']:+.1%}   "
-              f"Support ~{info['support']:,.0f}  Resistance ~{info['resistance']:,.0f}")
-    d.text((12, 34), detail, font=f_small, fill=(200, 208, 215))
+    gray = (200, 208, 215)
+    segments = [
+        (f"Close {info['close']:,.0f}   ", gray),
+        (f"{'above' if info['close'] > info['sma50'] else 'below'} "
+         f"SMA50 {info['sma50']:,.0f}", SMA50_RGB),
+        ("  /  ", gray),
+        (f"{'above' if info['close'] > info['sma200'] else 'below'} "
+         f"SMA200 {info['sma200']:,.0f}", SMA200_RGB),
+        (f"   1M {info['r21']:+.1%}  3M {info['r63']:+.1%}   "
+         f"Support ~{info['support']:,.0f}  Resistance ~{info['resistance']:,.0f}", gray),
+    ]
+    x = 12
+    for text, fill in segments:
+        d.text((x, 34), text, font=f_small, fill=fill)
+        x += d.textlength(text, font=f_small)
     return out
 
 

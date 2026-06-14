@@ -140,6 +140,16 @@ def _vol_label(z: float) -> str:
     return "within 1 std dev of mean"
 
 
+def _vol_tag(entry) -> str:
+    """Tile caption ('<br>Volume: High/Normal/Low') from a (label, ratio) entry."""
+    label = entry[0] if entry else None
+    if not label or label == "n/a":
+        return ""
+    band = ("High" if label.startswith("above")
+            else "Low" if label.startswith("below") else "Normal")
+    return f"<br>Volume: {band}"
+
+
 def volume_stats(symbols: list, periods: list, period_labels: list) -> dict:
     """Returns {period_label: {sym: (label, ratio)}}.
 
@@ -298,7 +308,9 @@ def _cluster_name(pct: float) -> str:
 HEADER_WEIGHT = 0.6  # area reserved for each cluster header bar
 
 
-def build_trace(syms: list, stats: dict, label: str, visible: bool) -> go.Treemap:
+def build_trace(syms: list, stats: dict, label: str, visible: bool,
+                vol_map: dict = None) -> go.Treemap:
+    vol_map = vol_map or {}
     pcts   = {s: stats.get(s, (0.0, 0, 0))[0] for s in syms}
     starts = {s: stats.get(s, (0.0, 0, 0))[1] for s in syms}
     ends   = {s: stats.get(s, (0.0, 0, 0))[2] for s in syms}
@@ -315,7 +327,8 @@ def build_trace(syms: list, stats: dict, label: str, visible: bool) -> go.Treema
     node_colors  = [cluster_color_map[c] for c in active] + \
                    [pct_to_color(pcts[s]) for s in syms]
     node_text    = [f"<b>{c}</b>  ({counts[c]})" for c in active] + \
-                   [f"<b>{s}</b><br>{pcts[s]:+.2f}%" for s in syms]
+                   [f"<b>{s}</b><br>{pcts[s]:+.2f}%{_vol_tag(vol_map.get(s))}"
+                    for s in syms]
     node_custom  = [[0, 0, 0]] * len(active) + \
                    [[pcts[s], starts[s], ends[s]] for s in syms]
 
@@ -378,7 +391,8 @@ def build_heatmap(prices: pd.DataFrame) -> str:
     }
 
     # Initial Plotly figure (Pre/Post Market — first in dropdown)
-    initial_trace = build_trace(syms, ah_stats, "Pre/Post Market", True)
+    initial_trace = build_trace(syms, ah_stats, "Pre/Post Market", True,
+                                vol_stats.get("1D", {}))
 
     legend_shapes, legend_annotations = [], []
     stops = [-20, -15, -10, -5, 0, 5, 10, 15, 20]
@@ -547,9 +561,16 @@ function buildTraceData(syms, periodData, period) {{
     active.map(c => [c.name, syms.filter(s => clusterName(pcts[s]) === c.name).length])
   );
   const single = syms.length === 1;
+  const volTag = s => {{
+    const lbl = ((VOL_DATA[period] || {{}})[s] || [])[0];
+    if (!lbl || lbl === 'n/a') return '';
+    const band = lbl.startsWith('above') ? 'High'
+               : lbl.startsWith('below') ? 'Low' : 'Normal';
+    return '<br>Volume: ' + band;
+  }};
   const symText = s => {{
     const ret = (pcts[s] >= 0 ? '+' : '') + pcts[s].toFixed(2) + '%';
-    if (!single) return '<b>' + s + '</b><br>' + ret;
+    if (!single) return '<b>' + s + '</b><br>' + ret + volTag(s);
     const v = (VOL_DATA[period] || {{}})[s];
     const volLine = (v && v[0] !== 'n/a')
       ? '<br>Volume: ' + v[1] + '× 30d avg (' + v[0] + ')'

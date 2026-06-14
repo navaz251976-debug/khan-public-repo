@@ -76,15 +76,17 @@ def period_stats(prices: pd.DataFrame, calendar_days: int) -> dict:
     return result
 
 
-def afterhours_stats(symbols: list) -> dict:
+def afterhours_stats(symbols: list, data=None) -> dict:
     """Returns {sym: (pct, reg_close, latest_price)} — last regular-session price
     vs the latest extended-hours (pre-market or after-hours) price.
 
     Fetches 2 days so that during pre-market (e.g. 6AM PT) the baseline is the
-    previous session's close rather than today's still-empty regular session."""
+    previous session's close rather than today's still-empty regular session.
+    Accepts a preloaded 1m pre/post frame so the download can be shared."""
     try:
-        data = yf.download(symbols, period="2d", interval="1m",
-                           prepost=True, auto_adjust=True, progress=False)
+        if data is None:
+            data = yf.download(symbols, period="2d", interval="1m",
+                               prepost=True, auto_adjust=True, progress=False)
         prices = data["Close"] if isinstance(data.columns, pd.MultiIndex) else data
         prices.columns = [str(c) for c in prices.columns]
     except Exception:
@@ -123,6 +125,99 @@ def afterhours_stats(symbols: list) -> dict:
         pct = round((ah_price - reg_close) / reg_close * 100, 2)
         result[sym] = (pct, int(round(reg_close)), int(round(ah_price)))
 
+    return result
+
+
+VOL_BASELINE = 30  # trading days used as the volume mean/std baseline
+
+
+def _vol_label(z: float) -> str:
+    """Map a volume z-score to a human band."""
+    if z >= 2:  return "above 2 std dev"
+    if z >= 1:  return "above 1 std dev"
+    if z <= -2: return "below 2 std dev"
+    if z <= -1: return "below 1 std dev"
+    return "within 1 std dev of mean"
+
+
+def volume_stats(symbols: list, periods: list, period_labels: list) -> dict:
+    """Returns {period_label: {sym: (label, ratio)}}.
+
+    For each period, the average daily volume over that trailing window is
+    compared to a VOL_BASELINE-trading-day mean/std. Spikes show up clearest in
+    the short windows (1D = latest session, 7D = last week's daily average)."""
+    empty = {lbl: {s: ("n/a", 0.0) for s in symbols} for lbl in period_labels}
+    try:
+        data = yf.download(symbols, period=f"{VOL_BASELINE + 15}d",
+                           auto_adjust=True, progress=False)
+        vol = data["Volume"]
+        if isinstance(vol, pd.Series):  # single symbol -> Series
+            vol = vol.to_frame(symbols[0])
+        vol.columns = [str(c) for c in vol.columns]
+    except Exception:
+        return empty
+
+    out = {lbl: {} for lbl in period_labels}
+    for sym in symbols:
+        series = vol[sym].dropna() if sym in vol.columns else pd.Series(dtype=float)
+        if len(series) < 20:
+            for lbl in period_labels:
+                out[lbl][sym] = ("n/a", 0.0)
+            continue
+        base = series.iloc[-VOL_BASELINE:]
+        mean, std = float(base.mean()), float(base.std())
+        for days, lbl in zip(periods, period_labels):
+            cutoff = series.index[-1] - pd.Timedelta(days=days - 1)
+            window = series[series.index >= cutoff]
+            if window.empty:
+                window = series.iloc[-1:]
+            avg = float(window.mean())
+            ratio = round(avg / mean, 2) if mean else 0.0
+            z = (avg - mean) / std if std else 0.0
+            out[lbl][sym] = (_vol_label(z), ratio)
+    return out
+
+
+def prepost_freq(symbols: list, data=None) -> dict:
+    """Returns {sym: (pre_prints, post_prints)} — count of 1-minute bars whose
+    price changed (a print) in the latest session's pre-market and after-hours
+    windows. A proxy for how actively a name trades outside RTH.
+
+    Uses price prints, not volume: Yahoo's 1m feed reports volume=0 for
+    extended-hours bars, so volume can't measure activity there. Reuses the 1m
+    pre/post frame already pulled for afterhours_stats."""
+    try:
+        if data is None:
+            data = yf.download(symbols, period="2d", interval="1m",
+                               prepost=True, auto_adjust=True, progress=False)
+        closes = data["Close"] if isinstance(data.columns, pd.MultiIndex) else data["Close"]
+        if isinstance(closes, pd.Series):
+            closes = closes.to_frame(symbols[0])
+        closes.columns = [str(c) for c in closes.columns]
+    except Exception:
+        return {s: (0, 0) for s in symbols}
+
+    result = {}
+    for sym in symbols:
+        if sym not in closes.columns:
+            result[sym] = (0, 0)
+            continue
+        series = closes[sym].dropna()
+        if series.empty:
+            result[sym] = (0, 0)
+            continue
+        try:
+            idx = series.index.tz_convert("America/New_York")
+            open_min, close_min = 9 * 60 + 30, 16 * 60
+        except Exception:
+            idx = series.index.tz_convert("UTC")
+            open_min, close_min = 14 * 60 + 30, 21 * 60  # 9:30/16:00 ET in UTC (EDT)
+        minutes = idx.hour * 60 + idx.minute
+        on_last = idx.date == idx[-1].date()   # latest available session only
+        printed = series.diff().fillna(0) != 0  # bar where price moved = a print
+        pre = int(((minutes < open_min) & on_last & printed.values).sum())
+        post = int(((minutes > close_min) & on_last & printed.values).sum())
+        result[sym] = (pre, post)
     return result
 
 
@@ -256,10 +351,19 @@ def build_heatmap(prices: pd.DataFrame) -> str:
     all_stats = {days: period_stats(prices, days) for days in PERIODS}
 
     print("Fetching pre/post-market data ...")
-    ah_stats = afterhours_stats(syms)
+    try:
+        pp_1m = yf.download(syms, period="2d", interval="1m",
+                            prepost=True, auto_adjust=True, progress=False)
+    except Exception:
+        pp_1m = None
+    ah_stats = afterhours_stats(syms, pp_1m)
+    pp_freq = prepost_freq(syms, pp_1m)
 
     print("Fetching news ...")
     news_data = fetch_news(syms)
+
+    print("Fetching volume stats ...")
+    vol_stats = volume_stats(syms, PERIODS, PERIOD_LABELS)
 
     print("Building annotated charts ...")
     sentiments = build_charts(syms, ah_stats)
@@ -323,7 +427,16 @@ def build_heatmap(prices: pd.DataFrame) -> str:
         + "\n      ".join(f'<option value="{s}">{s}</option>' for s in sorted(syms))
     )
 
+    # Volume read per period; "Pre/Post Market" reuses the latest-day (1D) read.
+    vol_js = {
+        lbl: {s: list(vol_stats.get(lbl, {}).get(s, ("n/a", 0.0))) for s in syms}
+        for lbl in PERIOD_LABELS
+    }
+    vol_js["Pre/Post Market"] = vol_js["1D"]
+
     data_json  = _json.dumps(data_js)
+    vol_json   = _json.dumps(vol_js)
+    ppf_json   = _json.dumps({s: list(pp_freq.get(s, (0, 0))) for s in syms})
     news_json  = _json.dumps(news_data)
     sent_json  = _json.dumps(sentiments)
     syms_json  = _json.dumps(syms)
@@ -389,6 +502,8 @@ select {{ background: #21262d; color: #fff; border: 1px solid #30363d;
 <div id="news-panel"></div>
 <script>
 const HEATMAP_DATA = {data_json};
+const VOL_DATA     = {vol_json};
+const PREPOST_FREQ = {ppf_json};
 const NEWS_DATA    = {news_json};
 const SENTIMENTS   = {sent_json};
 const CHART_VER    = "{now_et_str}";
@@ -435,11 +550,21 @@ function buildTraceData(syms, periodData, period) {{
   const symText = s => {{
     const ret = (pcts[s] >= 0 ? '+' : '') + pcts[s].toFixed(2) + '%';
     if (!single) return '<b>' + s + '</b><br>' + ret;
+    const v = (VOL_DATA[period] || {{}})[s];
+    const volLine = (v && v[0] !== 'n/a')
+      ? '<br>Volume: ' + v[1] + '× 30d avg (' + v[0] + ')'
+      : '';
+    const pp = PREPOST_FREQ[s];
+    const ppLine = (pp && (pp[0] || pp[1]))
+      ? '<br>Ext-hrs prints: pre ' + pp[0] + ' / post ' + pp[1]
+      : '';
     return '<b>' + s + '</b><br><br>' +
       'Period: ' + period + '<br>' +
       'Start: $' + starts[s] + '<br>' +
       'End: $' + ends[s] + '<br>' +
-      'Return: ' + ret;
+      'Return: ' + ret +
+      volLine +
+      ppLine;
   }};
   return {{
     labels:     [...active.map(c => c.name), ...syms],
